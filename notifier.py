@@ -1,103 +1,159 @@
+from __future__ import annotations
+
+import html
 import logging
 import os
-import asyncio
+import time
+from dataclasses import dataclass
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+import requests
+from dotenv import load_dotenv
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class TelegramConfig:
+    bot_token: str
+    chat_id: str
+    enabled: bool = True
+    timeout_seconds: int = 10
 
 
 class TelegramNotifier:
-    def __init__(self):
-        self.token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self.chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-        self.enabled = bool(self.token and self.chat_id)
-        self._bot = None
+    def __init__(self, config: TelegramConfig):
+        self.config = config
+        self.base_url = f"https://api.telegram.org/bot{self.config.bot_token}"
 
-        if not self.enabled:
-            logger.warning("Telegram not configured — notifications disabled")
+    @classmethod
+    def from_env(cls) -> "TelegramNotifier":
+        load_dotenv()
+        bot_token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+        chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+        enabled = os.getenv("TELEGRAM_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 
-    def _get_bot(self):
-        if self._bot is None and self.enabled:
-            try:
-                from telegram import Bot
-                self._bot = Bot(token=self.token)
-            except Exception as e:
-                logger.error(f"Failed to create Telegram bot: {e}")
-                self.enabled = False
-        return self._bot
+        if not bot_token or not chat_id:
+            raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set")
 
-    def _send(self, text: str):
-        if not self.enabled:
-            return
-        bot = self._get_bot()
-        if not bot:
-            return
+        return cls(TelegramConfig(bot_token=bot_token, chat_id=chat_id, enabled=enabled))
+
+    def send_message(self, text: str, disable_notification: bool = False) -> bool:
+        if not self.config.enabled:
+            return False
+
+        url = f"{self.base_url}/sendMessage"
+        payload = {
+            "chat_id": self.config.chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_notification": disable_notification,
+        }
+
         try:
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(bot.send_message(
-                chat_id=self.chat_id,
-                text=text,
-                parse_mode="HTML",
-            ))
-            loop.close()
-        except Exception as e:
-            logger.error(f"Telegram send failed: {e}")
+            response = requests.post(url, json=payload, timeout=self.config.timeout_seconds)
+            response.raise_for_status()
+            data = response.json()
 
-    def trade_opened(self, trade: dict):
-        direction_emoji = "📈" if trade["direction"] == "long" else "📉"
-        paper = " [PAPER]" if trade.get("paper_trade") else ""
-        msg = (
-            f"{direction_emoji} <b>TRADE OPENED{paper}</b>\n"
-            f"Coin: <b>{trade['coin']}</b>\n"
-            f"Direction: {trade['direction'].upper()}\n"
-            f"Strategy: {trade['strategy']}\n"
-            f"Conviction: {trade['conviction'].upper()}\n"
-            f"Entry: ${trade['entry_price']:,.4f}\n"
-            f"Size: ${trade['size_usd']:,.2f} ({trade['size_coin']:.4f} coins)\n"
-            f"Leverage: {trade['leverage']}x"
+            if not data.get("ok", False):
+                log.error("Telegram API returned not ok: %s", data)
+                return False
+
+            return True
+
+        except requests.RequestException as exc:
+            log.exception("Failed to send Telegram message: %s", exc)
+            return False
+
+    def send_trade_opened(
+        self,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        size_usd: float,
+        score: Optional[float] = None,
+        strategy: Optional[str] = None,
+        conviction: Optional[str] = None,
+        leverage: int = 1,
+        paper: bool = True,
+    ) -> bool:
+        safe_symbol = html.escape(symbol)
+        safe_strategy = html.escape(strategy) if strategy else "N/A"
+        safe_direction = html.escape(direction.upper())
+        safe_conviction = html.escape(conviction.upper()) if conviction else "N/A"
+
+        score_line = f"\n<b>Score:</b> {score:.2f}" if score is not None else ""
+        paper_line = "\n<b>Mode:</b> PAPER" if paper else ""
+
+        message = (
+            "🟢 <b>TRADE OPENED</b>\n"
+            f"<b>Symbol:</b> {safe_symbol}\n"
+            f"<b>Direction:</b> {safe_direction}\n"
+            f"<b>Entry:</b> ${entry_price:.4f}\n"
+            f"<b>Size:</b> ${size_usd:.2f}\n"
+            f"<b>Leverage:</b> {leverage}x\n"
+            f"<b>Conviction:</b> {safe_conviction}"
+            f"{score_line}\n"
+            f"<b>Strategy:</b> {safe_strategy}"
+            f"{paper_line}"
         )
-        logger.info(f"[NOTIFIER] Trade opened: {trade['coin']} {trade['direction']}")
-        self._send(msg)
+        return self.send_message(message)
 
-    def trade_closed(self, trade: dict):
-        pnl = trade.get("pnl_usd", 0)
-        pnl_pct = trade.get("pnl_pct", 0)
-        emoji = "✅" if pnl > 0 else "❌"
-        paper = " [PAPER]" if trade.get("paper_trade") else ""
-        msg = (
-            f"{emoji} <b>TRADE CLOSED{paper}</b>\n"
-            f"Coin: <b>{trade['coin']}</b>\n"
-            f"Direction: {trade['direction'].upper()}\n"
-            f"Entry: ${trade['entry_price']:,.4f} → Exit: ${trade['exit_price']:,.4f}\n"
-            f"PnL: <b>${pnl:+,.2f} ({pnl_pct:+.2f}%)</b>\n"
-            f"Reason: {trade.get('close_reason', 'unknown')}"
+    def send_trade_closed(
+        self,
+        symbol: str,
+        direction: str,
+        exit_price: float,
+        pnl_usd: float,
+        pnl_pct: float,
+        close_reason: str,
+        hold_minutes: Optional[float] = None,
+        paper: bool = True,
+    ) -> bool:
+        safe_symbol = html.escape(symbol)
+        safe_reason = html.escape(close_reason)
+        safe_direction = html.escape(direction.upper())
+
+        emoji = "✅" if pnl_usd >= 0 else "🔴"
+        hold_line = f"\n<b>Held:</b> {hold_minutes:.1f} min" if hold_minutes is not None else ""
+        paper_line = "\n<b>Mode:</b> PAPER" if paper else ""
+
+        message = (
+            f"{emoji} <b>TRADE CLOSED</b>\n"
+            f"<b>Symbol:</b> {safe_symbol}\n"
+            f"<b>Direction:</b> {safe_direction}\n"
+            f"<b>Exit:</b> ${exit_price:.4f}\n"
+            f"<b>PnL:</b> ${pnl_usd:.2f} ({pnl_pct:.2f}%)\n"
+            f"<b>Reason:</b> {safe_reason}"
+            f"{hold_line}"
+            f"{paper_line}"
         )
-        logger.info(f"[NOTIFIER] Trade closed: {trade['coin']} PnL=${pnl:+.2f}")
-        self._send(msg)
+        return self.send_message(message)
 
-    def error(self, msg: str):
-        text = f"⚠️ <b>BOT ERROR</b>\n{msg}"
-        logger.error(f"[NOTIFIER] {msg}")
-        self._send(text)
+    def send_intraday_update(
+        self,
+        realized_pnl_today: float,
+        open_count: int,
+        closed_today: int,
+        wins_today: int,
+        losses_today: int,
+    ) -> bool:
+        now_label = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        win_rate = (wins_today / (wins_today + losses_today) * 100) if (wins_today + losses_today) > 0 else 0.0
 
-    def info(self, msg: str):
-        text = f"ℹ️ {msg}"
-        logger.info(f"[NOTIFIER] {msg}")
-        self._send(text)
-
-    def stats(self, stats: dict):
-        wins = stats.get("wins", 0) or 0
-        losses = stats.get("losses", 0) or 0
-        total_pnl = stats.get("total_pnl", 0) or 0
-        avg_pct = stats.get("avg_pnl_pct", 0) or 0
-        open_count = stats.get("open_count", 0) or 0
-        win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
-
-        msg = (
-            f"📊 <b>BOT STATS</b>\n"
-            f"Open positions: {open_count}\n"
-            f"Win/Loss: {wins}/{losses} ({win_rate:.1f}%)\n"
-            f"Total PnL: <b>${total_pnl:+,.2f}</b>\n"
-            f"Avg PnL: {avg_pct:+.2f}%"
+        message = (
+            f"📊 <b>INTRADAY UPDATE</b> ({now_label})\n"
+            f"<b>Today's PnL:</b> ${realized_pnl_today:.2f}\n"
+            f"<b>Open trades:</b> {open_count}\n"
+            f"<b>Closed today:</b> {closed_today}\n"
+            f"<b>Win/Loss:</b> {wins_today}/{losses_today} ({win_rate:.1f}%)"
         )
-        self._send(msg)
+        return self.send_message(message)
+
+
+def build_notifier_or_none() -> Optional[TelegramNotifier]:
+    try:
+        return TelegramNotifier.from_env()
+    except Exception as exc:
+        log.warning("Telegram notifier disabled: %s", exc)
+        return None

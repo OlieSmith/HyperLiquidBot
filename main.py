@@ -7,7 +7,7 @@ import logging
 import os
 import sys
 import time
-from collections import defaultdict
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
@@ -27,15 +27,17 @@ logger = logging.getLogger("main")
 import database as db
 from exchange import HyperLiquidClient
 from risk import RiskManager
-from notifier import TelegramNotifier
+from notifier import TelegramNotifier, build_notifier_or_none
 from strategies import MomentumStrategy, MeanReversionStrategy, TrendFollowingStrategy
+
+INTRADAY_UPDATE_SECONDS = int(float(os.getenv("INTRADAY_UPDATE_HOURS", "4")) * 3600)
 
 
 def main():
     db.init_db()
 
     client = HyperLiquidClient()
-    notifier = TelegramNotifier()
+    notifier: TelegramNotifier | None = build_notifier_or_none()
 
     max_positions = int(os.getenv("MAX_POSITIONS", "10"))
     trailing_stop_pct = float(os.getenv("TRAILING_STOP_PCT", "2.0"))
@@ -55,9 +57,11 @@ def main():
     net_str = "TESTNET" if os.getenv("TESTNET", "false").lower() == "true" else "MAINNET"
     startup_msg = f"HyperLiquid Bot started — {mode_str} / {net_str}"
     logger.info(startup_msg)
-    notifier.info(startup_msg)
+    if notifier:
+        notifier.send_message(f"ℹ️ {startup_msg}")
 
     scan_count = 0
+    next_intraday_update = time.time() + INTRADAY_UPDATE_SECONDS
 
     while True:
         try:
@@ -77,7 +81,7 @@ def main():
             # ── 2. Check and close trailing stops ─────────────────────────────
             stops_to_close = risk.update_trailing_stops(current_prices)
             for stop in stops_to_close:
-                _close_trade(stop["trade_id"], stop["coin"], stop["reason"], client, notifier, current_prices)
+                _close_trade(stop["trade_id"], stop["coin"], stop["reason"], client, notifier, current_prices, paper_trading)
 
             # ── 3. Generate signals for each coin ─────────────────────────────
             composite_signals = []
@@ -147,8 +151,18 @@ def main():
 
                 risk.init_trailing_stop(trade_id, coin, signal.direction, fill_price)
 
-                trade_record = db.get_trade(trade_id)
-                notifier.trade_opened(trade_record)
+                if notifier:
+                    notifier.send_trade_opened(
+                        symbol=coin,
+                        direction=signal.direction,
+                        entry_price=fill_price,
+                        size_usd=size_usd,
+                        score=signal.score,
+                        strategy=signal.strategy,
+                        conviction=signal.conviction,
+                        leverage=client.leverage,
+                        paper=paper_trading,
+                    )
 
                 logger.info(
                     f"Opened {signal.direction.upper()} {coin} | "
@@ -156,7 +170,13 @@ def main():
                     f"score={signal.score:.3f}"
                 )
 
-            # ── 5. Periodic stats (every 10 scans) ────────────────────────────
+            # ── 5. Intraday update (every N hours, same as SolanaBot) ──────────
+            now = time.time()
+            if now >= next_intraday_update:
+                _send_intraday_update(notifier)
+                next_intraday_update = now + INTRADAY_UPDATE_SECONDS
+
+            # ── 6. Log periodic stats ──────────────────────────────────────────
             if scan_count % 10 == 0:
                 stats = db.get_stats()
                 logger.info(
@@ -164,22 +184,29 @@ def main():
                     f"wins={stats.get('wins', 0)} | losses={stats.get('losses', 0)} | "
                     f"PnL=${stats.get('total_pnl', 0):+.2f}"
                 )
-                if scan_count % 50 == 0:
-                    notifier.stats(stats)
 
         except KeyboardInterrupt:
             logger.info("Shutting down...")
-            notifier.info("Bot stopped by user")
+            if notifier:
+                notifier.send_message("ℹ️ HyperLiquid Bot stopped by user")
             break
         except Exception as e:
             logger.exception(f"Unexpected error in main loop: {e}")
-            notifier.error(str(e))
+            if notifier:
+                notifier.send_message(f"⚠️ <b>BOT ERROR</b>\n{e}")
 
         time.sleep(scan_interval)
 
 
-def _close_trade(trade_id: int, coin: str, reason: str, client: HyperLiquidClient,
-                 notifier: TelegramNotifier, current_prices: dict):
+def _close_trade(
+    trade_id: int,
+    coin: str,
+    reason: str,
+    client: HyperLiquidClient,
+    notifier: TelegramNotifier | None,
+    current_prices: dict,
+    paper_trading: bool,
+):
     trade = db.get_trade(trade_id)
     if not trade or trade["status"] != "open":
         return
@@ -202,12 +229,47 @@ def _close_trade(trade_id: int, coin: str, reason: str, client: HyperLiquidClien
 
     fill_price = result.get("fill_price", price)
     closed = db.close_trade(trade_id, fill_price, reason)
-    notifier.trade_closed(closed)
+
+    hold_minutes = None
+    if closed.get("open_time"):
+        try:
+            open_dt = datetime.fromisoformat(closed["open_time"])
+            hold_minutes = (datetime.utcnow() - open_dt).total_seconds() / 60
+        except Exception:
+            pass
+
+    if notifier:
+        notifier.send_trade_closed(
+            symbol=coin,
+            direction=closed.get("direction", ""),
+            exit_price=fill_price,
+            pnl_usd=closed.get("pnl_usd", 0),
+            pnl_pct=closed.get("pnl_pct", 0),
+            close_reason=reason,
+            hold_minutes=hold_minutes,
+            paper=paper_trading,
+        )
 
     logger.info(
         f"Closed {coin} | reason={reason} | "
         f"PnL=${closed.get('pnl_usd', 0):+.2f} ({closed.get('pnl_pct', 0):+.2f}%)"
     )
+
+
+def _send_intraday_update(notifier: TelegramNotifier | None):
+    if not notifier:
+        return
+    try:
+        stats = db.get_stats()
+        notifier.send_intraday_update(
+            realized_pnl_today=stats.get("total_pnl", 0) or 0,
+            open_count=stats.get("open_count", 0) or 0,
+            closed_today=(stats.get("wins", 0) or 0) + (stats.get("losses", 0) or 0),
+            wins_today=stats.get("wins", 0) or 0,
+            losses_today=stats.get("losses", 0) or 0,
+        )
+    except Exception as exc:
+        logger.warning("Failed to send intraday update: %s", exc)
 
 
 if __name__ == "__main__":
