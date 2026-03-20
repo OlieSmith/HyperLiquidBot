@@ -2,9 +2,10 @@
 Mean Reversion Strategy
 -----------------------
 Uses Bollinger Bands + RSI extremes.
-Long:  Price closes below lower BB and RSI < 35 (oversold)
-Short: Price closes above upper BB and RSI > 65 (overbought)
+Long:  Price closes below lower BB and RSI < 31 (oversold)
+Short: Price closes above upper BB and RSI > 69 (overbought)
 Conviction scales with distance from band and RSI extreme.
+Tighter RSI thresholds (69/31) reduce noise by only firing on truly extreme reads.
 """
 import logging
 import pandas as pd
@@ -52,11 +53,11 @@ class MeanReversionStrategy(BaseStrategy):
             if pd.isna(cur_upper) or pd.isna(cur_lower) or band_width == 0:
                 return self._no_signal(coin)
 
-            # Long: price below lower band and RSI oversold
-            if cur_price < cur_lower and cur_rsi < 40:
+            # Long: price below lower band and RSI deeply oversold (31)
+            if cur_price < cur_lower and cur_rsi < 31:
                 # Score: how far below lower band + how oversold
                 band_pct = (cur_lower - cur_price) / band_width  # 0..∞ (>0 means below)
-                rsi_pct = (40 - cur_rsi) / 40  # 0..1
+                rsi_pct = (31 - cur_rsi) / 31  # 0..1
                 score = min(1.0, band_pct * 0.6 + rsi_pct * 0.4)
                 return Signal(
                     coin=coin,
@@ -70,10 +71,10 @@ class MeanReversionStrategy(BaseStrategy):
                     },
                 )
 
-            # Short: price above upper band and RSI overbought
-            if cur_price > cur_upper and cur_rsi > 60:
+            # Short: price above upper band and RSI deeply overbought (69)
+            if cur_price > cur_upper and cur_rsi > 69:
                 band_pct = (cur_price - cur_upper) / band_width
-                rsi_pct = (cur_rsi - 60) / 40
+                rsi_pct = (cur_rsi - 69) / 31
                 score = min(1.0, band_pct * 0.6 + rsi_pct * 0.4)
                 return Signal(
                     coin=coin,

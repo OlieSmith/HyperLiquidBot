@@ -1,7 +1,7 @@
 """
 HyperLiquid Perpetuals Trading Bot
 ====================================
-Strategies: Momentum | Mean Reversion | Trend Following
+Strategies: Momentum | Mean Reversion | Trend Following | BB Compression
 """
 import logging
 import os
@@ -24,13 +24,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
+import numpy as np
+import pandas as pd
+
 import database as db
 from exchange import HyperLiquidClient
 from risk import RiskManager
 from notifier import TelegramNotifier, build_notifier_or_none
-from strategies import MomentumStrategy, MeanReversionStrategy, TrendFollowingStrategy
+from strategies import MomentumStrategy, MeanReversionStrategy, TrendFollowingStrategy, BBCompressionStrategy
 
 INTRADAY_UPDATE_SECONDS = int(float(os.getenv("INTRADAY_UPDATE_HOURS", "4")) * 3600)
+
+ATR_PERIOD = 14
+ATR_MULTIPLIER = 5.5   # matches the Nunchi research finding
+ATR_MIN_TRAIL_PCT = 1.0
+ATR_MAX_TRAIL_PCT = 15.0
+
+
+def _calc_atr_pct(df: pd.DataFrame, price: float, period: int = ATR_PERIOD) -> float:
+    """Return ATR as a % of price. Used to set dynamic trailing stop distance."""
+    if df is None or len(df) < period + 1:
+        return 0.0
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    atr = tr.rolling(period).mean().iloc[-1]
+    if pd.isna(atr) or price <= 0:
+        return 0.0
+    return (atr / price) * 100
 
 
 def main():
@@ -51,6 +76,7 @@ def main():
         MomentumStrategy(),
         MeanReversionStrategy(),
         TrendFollowingStrategy(),
+        BBCompressionStrategy(),
     ]
 
     mode_str = "PAPER TRADING" if paper_trading else "LIVE TRADING"
@@ -81,10 +107,10 @@ def main():
             # ── 2. Check and close trailing stops ─────────────────────────────
             stops_to_close = risk.update_trailing_stops(current_prices)
             for stop in stops_to_close:
-                _close_trade(stop["trade_id"], stop["coin"], stop["reason"], client, notifier, current_prices, paper_trading)
+                _close_trade(stop["trade_id"], stop["coin"], stop["reason"], client, notifier, current_prices, paper_trading, risk)
 
             # ── 3. Generate signals for each coin ─────────────────────────────
-            composite_signals = []
+            composite_signals = []   # list of (signal, df) tuples
             for coin in coins:
                 if coin not in current_prices:
                     continue
@@ -101,14 +127,14 @@ def main():
                 if coin_signals:
                     composite = risk.aggregate_signals(coin_signals)
                     if composite:
-                        composite_signals.append(composite)
+                        composite_signals.append((composite, df))
 
             logger.info(f"Active signals: {len(composite_signals)}")
 
             # ── 4. Execute trades ──────────────────────────────────────────────
             account_value = client.get_account_value()
 
-            for signal in composite_signals:
+            for signal, signal_df in composite_signals:
                 coin = signal.coin
                 can_open, reason = risk.can_open_position(coin)
                 if not can_open:
@@ -149,7 +175,12 @@ def main():
                     order_id=result.get("order_id"),
                 )
 
-                risk.init_trailing_stop(trade_id, coin, signal.direction, fill_price)
+                # ATR-based trailing stop: 5.5x ATR as % of price
+                atr_pct = _calc_atr_pct(signal_df, fill_price)
+                atr_trail_pct = None
+                if atr_pct > 0:
+                    atr_trail_pct = max(ATR_MIN_TRAIL_PCT, min(ATR_MAX_TRAIL_PCT, atr_pct * ATR_MULTIPLIER))
+                risk.init_trailing_stop(trade_id, coin, signal.direction, fill_price, atr_trail_pct)
 
                 if notifier:
                     notifier.send_trade_opened(
@@ -167,7 +198,11 @@ def main():
                 logger.info(
                     f"Opened {signal.direction.upper()} {coin} | "
                     f"conviction={signal.conviction} | size=${size_usd:.2f} | "
-                    f"score={signal.score:.3f}"
+                    f"score={signal.score:.3f} | "
+                    f"trail={atr_trail_pct:.2f}% (ATR)" if atr_trail_pct else
+                    f"Opened {signal.direction.upper()} {coin} | "
+                    f"conviction={signal.conviction} | size=${size_usd:.2f} | "
+                    f"score={signal.score:.3f} | trail={trailing_stop_pct:.2f}% (fixed)"
                 )
 
             # ── 5. Intraday update (every N hours, same as SolanaBot) ──────────
@@ -206,6 +241,7 @@ def _close_trade(
     notifier: TelegramNotifier | None,
     current_prices: dict,
     paper_trading: bool,
+    risk: RiskManager | None = None,
 ):
     trade = db.get_trade(trade_id)
     if not trade or trade["status"] != "open":
@@ -229,6 +265,10 @@ def _close_trade(
 
     fill_price = result.get("fill_price", price)
     closed = db.close_trade(trade_id, fill_price, reason)
+
+    # Start cooldown to prevent immediate re-entry on this coin
+    if risk is not None:
+        risk.set_cooldown(coin)
 
     hold_minutes = None
     if closed.get("open_time"):

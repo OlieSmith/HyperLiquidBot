@@ -4,10 +4,12 @@ Risk Manager
 - Aggregates signals from multiple strategies (weighted vote)
 - Sizes positions by conviction (2% / 5% / 10% of portfolio)
 - Enforces max concurrent positions
-- Manages trailing stops
+- Manages trailing stops (ATR-based when ATR is provided, else fixed-pct fallback)
+- Enforces per-coin cooldown after a close to prevent immediate re-entry
 """
 import logging
 import os
+import time
 from typing import Optional
 from collections import defaultdict
 
@@ -23,16 +25,21 @@ CONVICTION_PCT = {
 }
 
 STRATEGY_WEIGHTS = {
-    "momentum":       float(os.getenv("MOMENTUM_WEIGHT",       "1.0")),
-    "mean_reversion": float(os.getenv("MEAN_REVERSION_WEIGHT", "1.0")),
+    "momentum":        float(os.getenv("MOMENTUM_WEIGHT",        "1.0")),
+    "mean_reversion":  float(os.getenv("MEAN_REVERSION_WEIGHT",  "1.0")),
     "trend_following": float(os.getenv("TREND_FOLLOWING_WEIGHT", "1.0")),
+    "bb_compression":  float(os.getenv("BB_COMPRESSION_WEIGHT",  "1.0")),
 }
+
+# Default cooldown after a trade closes: 2 x 15-minute bars = 30 minutes
+COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "1800"))
 
 
 class RiskManager:
     def __init__(self, max_positions: int, trailing_stop_pct: float):
         self.max_positions = max_positions
         self.trailing_stop_pct = trailing_stop_pct
+        self._cooldown_until: dict[str, float] = {}  # coin -> epoch when cooldown expires
 
     # ─── Signal Aggregation ───────────────────────────────────────────────────
 
@@ -105,6 +112,12 @@ class RiskManager:
 
     def can_open_position(self, coin: str) -> tuple[bool, str]:
         """Check if we can open a new position."""
+        # Enforce cooldown: block re-entry for COOLDOWN_SECONDS after last close
+        cooldown_exp = self._cooldown_until.get(coin, 0)
+        if time.time() < cooldown_exp:
+            remaining = int(cooldown_exp - time.time())
+            return False, f"Cooldown active for {coin} ({remaining}s remaining)"
+
         open_trades = db.get_open_trades()
 
         if len(open_trades) >= self.max_positions:
@@ -116,18 +129,38 @@ class RiskManager:
 
         return True, "ok"
 
+    def set_cooldown(self, coin: str):
+        """Start cooldown for coin after a trade closes (prevents immediate re-entry)."""
+        self._cooldown_until[coin] = time.time() + COOLDOWN_SECONDS
+        logger.debug(f"Cooldown set for {coin}: {COOLDOWN_SECONDS}s")
+
     # ─── Trailing Stops ───────────────────────────────────────────────────────
 
-    def init_trailing_stop(self, trade_id: int, coin: str, direction: str, entry_price: float):
+    def init_trailing_stop(
+        self,
+        trade_id: int,
+        coin: str,
+        direction: str,
+        entry_price: float,
+        atr_trail_pct: Optional[float] = None,
+    ):
+        """
+        Initialise a trailing stop.
+        atr_trail_pct: ATR-based trail distance as % of price (5.5x ATR).
+                       Falls back to self.trailing_stop_pct if not provided.
+        """
+        trail_pct = atr_trail_pct if atr_trail_pct is not None else self.trailing_stop_pct
+
         if direction == "long":
             hwm = entry_price
-            stop = entry_price * (1 - self.trailing_stop_pct / 100)
+            stop = entry_price * (1 - trail_pct / 100)
         else:
             hwm = entry_price
-            stop = entry_price * (1 + self.trailing_stop_pct / 100)
+            stop = entry_price * (1 + trail_pct / 100)
 
-        db.upsert_trailing_stop(trade_id, coin, direction, entry_price, self.trailing_stop_pct, hwm, stop)
-        logger.info(f"Trailing stop initialized: {coin} {direction} stop=${stop:.4f}")
+        source = "ATR" if atr_trail_pct is not None else "fixed"
+        db.upsert_trailing_stop(trade_id, coin, direction, entry_price, trail_pct, hwm, stop)
+        logger.info(f"Trailing stop initialized ({source}): {coin} {direction} trail={trail_pct:.2f}% stop=${stop:.4f}")
 
     def update_trailing_stops(self, current_prices: dict[str, float]) -> list[dict]:
         """

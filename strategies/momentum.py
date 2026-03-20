@@ -1,9 +1,11 @@
 """
 Momentum Strategy
 -----------------
-Long:  RSI turning up from oversold (40-55 zone) + positive Rate-of-Change
-Short: RSI turning down from overbought (45-60 zone) + negative Rate-of-Change
+Long:  RSI turning up from oversold (40-65 zone) + positive Rate-of-Change
+Short: RSI turning down from overbought (35-60 zone) + negative Rate-of-Change
 Conviction scales with RSI position and ROC magnitude.
+ROC threshold is scaled dynamically by realized volatility: higher vol requires
+a stronger ROC to avoid entering on noise.
 """
 import logging
 import pandas as pd
@@ -15,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 RSI_PERIOD = 14
 ROC_PERIOD = 10
+VOL_PERIOD = 20        # bars for realized volatility
+BASE_ROC_THRESHOLD = 0.5  # % — baseline ROC threshold at average volatility
 
 
 def _rsi(series: pd.Series, period: int) -> pd.Series:
@@ -33,7 +37,7 @@ class MomentumStrategy(BaseStrategy):
     name = "momentum"
 
     def generate_signal(self, coin: str, df: pd.DataFrame) -> Signal:
-        if len(df) < max(RSI_PERIOD, ROC_PERIOD) + 5:
+        if len(df) < max(RSI_PERIOD, ROC_PERIOD, VOL_PERIOD) + 5:
             return self._no_signal(coin)
 
         try:
@@ -51,11 +55,19 @@ class MomentumStrategy(BaseStrategy):
             rsi_rising = cur_rsi > prev_rsi
             rsi_falling = cur_rsi < prev_rsi
 
+            # Dynamic ROC threshold scaled by realized volatility
+            realized_vol = close.pct_change().rolling(VOL_PERIOD).std().iloc[-1]
+            if pd.isna(realized_vol) or realized_vol <= 0:
+                realized_vol = 0.02  # fallback: 2% per bar
+            # vol_ratio > 1 = high vol, < 1 = low vol; scale threshold proportionally
+            vol_ratio = realized_vol / 0.02
+            roc_threshold = BASE_ROC_THRESHOLD * max(0.5, min(2.5, vol_ratio))
+
             # Normalize ROC to -1..1 (cap at ±5%)
             roc_norm = max(-1.0, min(1.0, cur_roc / 5.0))
 
-            # Long: RSI in 40-65 and rising, positive ROC
-            if 40 <= cur_rsi <= 65 and rsi_rising and cur_roc > 0.5:
+            # Long: RSI in 40-65 and rising, positive ROC exceeds dynamic threshold
+            if 40 <= cur_rsi <= 65 and rsi_rising and cur_roc > roc_threshold:
                 score = ((cur_rsi - 40) / 25) * 0.5 + roc_norm * 0.5
                 score = min(score, 1.0)
                 return Signal(
@@ -64,11 +76,11 @@ class MomentumStrategy(BaseStrategy):
                     conviction=self._conviction_from_score(score),
                     strategy=self.name,
                     score=score,
-                    metadata={"rsi": round(cur_rsi, 2), "roc": round(cur_roc, 2)},
+                    metadata={"rsi": round(cur_rsi, 2), "roc": round(cur_roc, 2), "roc_threshold": round(roc_threshold, 3)},
                 )
 
-            # Short: RSI in 35-60 and falling, negative ROC
-            if 35 <= cur_rsi <= 60 and rsi_falling and cur_roc < -0.5:
+            # Short: RSI in 35-60 and falling, negative ROC exceeds dynamic threshold
+            if 35 <= cur_rsi <= 60 and rsi_falling and cur_roc < -roc_threshold:
                 score = ((60 - cur_rsi) / 25) * 0.5 + abs(roc_norm) * 0.5
                 score = min(score, 1.0)
                 return Signal(
@@ -77,7 +89,7 @@ class MomentumStrategy(BaseStrategy):
                     conviction=self._conviction_from_score(score),
                     strategy=self.name,
                     score=-score,
-                    metadata={"rsi": round(cur_rsi, 2), "roc": round(cur_roc, 2)},
+                    metadata={"rsi": round(cur_rsi, 2), "roc": round(cur_roc, 2), "roc_threshold": round(roc_threshold, 3)},
                 )
 
         except Exception as e:
