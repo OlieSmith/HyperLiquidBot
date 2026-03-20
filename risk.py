@@ -64,7 +64,7 @@ class RiskManager:
         short_score /= total_weight
 
         # Need at least 0.3 normalized score to act
-        if long_score > short_score and long_score >= 0.3:
+        if long_score > short_score and long_score >= 0.4:
             conviction = self._score_to_conviction(long_score)
             return Signal(
                 coin=coin,
@@ -74,7 +74,7 @@ class RiskManager:
                 score=long_score,
                 metadata={"long_score": long_score, "short_score": short_score},
             )
-        elif short_score > long_score and short_score >= 0.3:
+        elif short_score > long_score and short_score >= 0.4:
             conviction = self._score_to_conviction(short_score)
             return Signal(
                 coin=coin,
