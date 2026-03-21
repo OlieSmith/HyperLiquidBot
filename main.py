@@ -3,6 +3,7 @@ HyperLiquid Perpetuals Trading Bot
 ====================================
 Strategies: Momentum | Mean Reversion | Trend Following | BB Compression
 """
+import html
 import logging
 import os
 import sys
@@ -115,6 +116,7 @@ def main():
                 if coin not in current_prices:
                     continue
                 df = client.get_candles(coin, interval="15m", lookback_hours=72)
+                time.sleep(0.15)  # avoid 429 rate limiting from HyperLiquid API
                 if df.empty or len(df) < 40:
                     continue
 
@@ -126,6 +128,19 @@ def main():
 
                 if coin_signals:
                     composite = risk.aggregate_signals(coin_signals)
+                    if composite:
+                        # Trend filter: block trades that fight the 200-bar SMA direction.
+                        # 200 bars of 15m data ≈ 50 hours of trend context.
+                        if len(df) >= 200:
+                            sma200 = df["close"].rolling(200).mean().iloc[-1]
+                            cur_price = df["close"].iloc[-1]
+                            if not pd.isna(sma200):
+                                if composite.direction == "short" and cur_price > sma200:
+                                    logger.debug(f"Trend filter: blocked short {coin} (price above 200-SMA)")
+                                    composite = None
+                                elif composite.direction == "long" and cur_price < sma200:
+                                    logger.debug(f"Trend filter: blocked long {coin} (price below 200-SMA)")
+                                    composite = None
                     if composite:
                         composite_signals.append((composite, df))
 
@@ -228,7 +243,7 @@ def main():
         except Exception as e:
             logger.exception(f"Unexpected error in main loop: {e}")
             if notifier:
-                notifier.send_message(f"⚠️ <b>BOT ERROR</b>\n{e}")
+                notifier.send_message(f"⚠️ <b>BOT ERROR</b>\n{html.escape(str(e))[:500]}")
 
         time.sleep(scan_interval)
 
