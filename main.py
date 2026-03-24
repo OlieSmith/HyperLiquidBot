@@ -37,9 +37,9 @@ from strategies import MomentumStrategy, MeanReversionStrategy, TrendFollowingSt
 INTRADAY_UPDATE_SECONDS = int(float(os.getenv("INTRADAY_UPDATE_HOURS", "4")) * 3600)
 
 ATR_PERIOD = 14
-ATR_MULTIPLIER = 5.5   # matches the Nunchi research finding
+ATR_MULTIPLIER = 3.0   # reduced from 5.5 — tighter stops to cut losers faster
 ATR_MIN_TRAIL_PCT = 1.0
-ATR_MAX_TRAIL_PCT = 15.0
+ATR_MAX_TRAIL_PCT = 8.0  # capped at 8% — prevents blow-ups on volatile coins like TURBO
 
 
 def _calc_atr_pct(df: pd.DataFrame, price: float, period: int = ATR_PERIOD) -> float:
@@ -289,7 +289,7 @@ def _close_trade(
     if closed.get("open_time"):
         try:
             open_dt = datetime.fromisoformat(closed["open_time"])
-            hold_minutes = (datetime.utcnow() - open_dt).total_seconds() / 60
+            hold_minutes = (datetime.now(timezone.utc) - open_dt.replace(tzinfo=timezone.utc)).total_seconds() / 60
         except Exception:
             pass
 
