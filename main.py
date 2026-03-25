@@ -327,5 +327,21 @@ def _send_intraday_update(notifier: TelegramNotifier | None):
         logger.warning("Failed to send intraday update: %s", exc)
 
 
+def _acquire_pid_lock(pid_file: str = "/tmp/hyperliquidbot.pid") -> None:
+    if os.path.exists(pid_file):
+        try:
+            existing_pid = int(open(pid_file).read().strip())
+            os.kill(existing_pid, 0)
+            print(f"Bot already running (PID {existing_pid}). Exiting.")
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+    import atexit
+    atexit.register(os.remove, pid_file)
+
+
 if __name__ == "__main__":
+    _acquire_pid_lock()
     main()
