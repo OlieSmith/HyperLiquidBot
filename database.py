@@ -48,6 +48,7 @@ def init_db():
                 trail_pct REAL NOT NULL,
                 high_water_mark REAL NOT NULL,
                 stop_price REAL NOT NULL,
+                profit_target REAL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (trade_id) REFERENCES trades(id)
             );
@@ -57,6 +58,13 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_trailing_coin ON trailing_stops(coin);
         """)
         conn.commit()
+        # Migrate existing tables that predate the profit_target column
+        try:
+            conn.execute("ALTER TABLE trailing_stops ADD COLUMN profit_target REAL")
+            conn.commit()
+            logger.info("Migrated trailing_stops: added profit_target column")
+        except Exception:
+            pass  # column already exists
         logger.info("Database initialized")
     finally:
         conn.close()
@@ -144,6 +152,7 @@ def upsert_trailing_stop(
     trail_pct: float,
     high_water_mark: float,
     stop_price: float,
+    profit_target: Optional[float] = None,
 ):
     conn = get_connection()
     try:
@@ -163,11 +172,11 @@ def upsert_trailing_stop(
             conn.execute(
                 """
                 INSERT INTO trailing_stops
-                  (trade_id, coin, direction, entry_price, trail_pct, high_water_mark, stop_price, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  (trade_id, coin, direction, entry_price, trail_pct, high_water_mark, stop_price, profit_target, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (trade_id, coin, direction, entry_price, trail_pct,
-                 high_water_mark, stop_price, datetime.utcnow().isoformat()),
+                 high_water_mark, stop_price, profit_target, datetime.utcnow().isoformat()),
             )
         conn.commit()
     finally:
@@ -220,6 +229,24 @@ def get_stats() -> dict:
               SUM(CASE WHEN status='closed' AND pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
               SUM(CASE WHEN status='closed' THEN pnl_usd ELSE 0 END) as total_pnl,
               AVG(CASE WHEN status='closed' THEN pnl_pct ELSE NULL END) as avg_pnl_pct
+            FROM trades
+            """
+        ).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+def get_daily_stats() -> dict:
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT
+              SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) as open_count,
+              SUM(CASE WHEN status='closed' AND date(close_time) = date('now') AND pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+              SUM(CASE WHEN status='closed' AND date(close_time) = date('now') AND pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
+              SUM(CASE WHEN status='closed' AND date(close_time) = date('now') THEN pnl_usd ELSE 0 END) as pnl_today
             FROM trades
             """
         ).fetchone()

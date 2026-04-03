@@ -34,6 +34,9 @@ STRATEGY_WEIGHTS = {
 # Default cooldown after a trade closes: 2 x 15-minute bars = 30 minutes
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "1800"))
 
+# Profit target as a multiple of the trail distance (e.g. 1.5 means target = 1.5x the stop distance)
+PROFIT_TARGET_R = float(os.getenv("PROFIT_TARGET_R", "1.5"))
+
 
 class RiskManager:
     def __init__(self, max_positions: int, trailing_stop_pct: float):
@@ -70,8 +73,12 @@ class RiskManager:
         long_score /= total_weight
         short_score /= total_weight
 
-        # Need at least 0.55 normalized score to act (raised from 0.4 to reduce noise trades)
-        if long_score > short_score and long_score >= 0.55:
+        # Require at least 2 strategies to agree before entering
+        if len(signals) < 2:
+            return None
+
+        # Need at least 0.70 normalized score to act — raised from 0.65 to cut borderline entries
+        if long_score > short_score and long_score >= 0.70:
             conviction = self._score_to_conviction(long_score)
             return Signal(
                 coin=coin,
@@ -81,7 +88,7 @@ class RiskManager:
                 score=long_score,
                 metadata={"long_score": long_score, "short_score": short_score},
             )
-        elif short_score > long_score and short_score >= 0.55:
+        elif short_score > long_score and short_score >= 0.70:
             conviction = self._score_to_conviction(short_score)
             return Signal(
                 coin=coin,
@@ -158,9 +165,18 @@ class RiskManager:
             hwm = entry_price
             stop = entry_price * (1 + trail_pct / 100)
 
+        target_dist_pct = trail_pct * PROFIT_TARGET_R
+        if direction == "long":
+            profit_target = entry_price * (1 + target_dist_pct / 100)
+        else:
+            profit_target = entry_price * (1 - target_dist_pct / 100)
+
         source = "ATR" if atr_trail_pct is not None else "fixed"
-        db.upsert_trailing_stop(trade_id, coin, direction, entry_price, trail_pct, hwm, stop)
-        logger.info(f"Trailing stop initialized ({source}): {coin} {direction} trail={trail_pct:.2f}% stop=${stop:.4f}")
+        db.upsert_trailing_stop(trade_id, coin, direction, entry_price, trail_pct, hwm, stop, profit_target)
+        logger.info(
+            f"Trailing stop initialized ({source}): {coin} {direction} "
+            f"trail={trail_pct:.2f}% stop=${stop:.4f} target=${profit_target:.4f}"
+        )
 
     def update_trailing_stops(self, current_prices: dict[str, float]) -> list[dict]:
         """
@@ -180,8 +196,13 @@ class RiskManager:
             hwm = ts["high_water_mark"]
             trail_pct = ts["trail_pct"]
             trade_id = ts["trade_id"]
+            profit_target = ts.get("profit_target")
 
             if direction == "long":
+                if profit_target and price >= profit_target:
+                    logger.info(f"Profit target hit: {coin} LONG price={price:.4f} target={profit_target:.4f}")
+                    to_close.append({"trade_id": trade_id, "coin": coin, "reason": "profit_target"})
+                    continue
                 new_hwm = max(hwm, price)
                 stop_price = new_hwm * (1 - trail_pct / 100)
                 if price <= stop_price:
@@ -189,9 +210,13 @@ class RiskManager:
                     to_close.append({"trade_id": trade_id, "coin": coin, "reason": "trailing_stop"})
                 else:
                     db.upsert_trailing_stop(
-                        trade_id, coin, direction, ts["entry_price"], trail_pct, new_hwm, stop_price
+                        trade_id, coin, direction, ts["entry_price"], trail_pct, new_hwm, stop_price, profit_target
                     )
             else:  # short
+                if profit_target and price <= profit_target:
+                    logger.info(f"Profit target hit: {coin} SHORT price={price:.4f} target={profit_target:.4f}")
+                    to_close.append({"trade_id": trade_id, "coin": coin, "reason": "profit_target"})
+                    continue
                 new_hwm = min(hwm, price)
                 stop_price = new_hwm * (1 + trail_pct / 100)
                 if price >= stop_price:
@@ -199,7 +224,7 @@ class RiskManager:
                     to_close.append({"trade_id": trade_id, "coin": coin, "reason": "trailing_stop"})
                 else:
                     db.upsert_trailing_stop(
-                        trade_id, coin, direction, ts["entry_price"], trail_pct, new_hwm, stop_price
+                        trade_id, coin, direction, ts["entry_price"], trail_pct, new_hwm, stop_price, profit_target
                     )
 
         return to_close

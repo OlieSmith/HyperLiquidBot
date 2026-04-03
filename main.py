@@ -19,7 +19,6 @@ logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.StreamHandler(sys.stdout),
         logging.FileHandler("bot.log"),
     ],
 )
@@ -315,9 +314,9 @@ def _send_intraday_update(notifier: TelegramNotifier | None):
     if not notifier:
         return
     try:
-        stats = db.get_stats()
+        stats = db.get_daily_stats()
         notifier.send_intraday_update(
-            realized_pnl_today=stats.get("total_pnl", 0) or 0,
+            realized_pnl_today=stats.get("pnl_today", 0) or 0,
             open_count=stats.get("open_count", 0) or 0,
             closed_today=(stats.get("wins", 0) or 0) + (stats.get("losses", 0) or 0),
             wins_today=stats.get("wins", 0) or 0,
