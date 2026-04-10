@@ -58,13 +58,18 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_trailing_coin ON trailing_stops(coin);
         """)
         conn.commit()
-        # Migrate existing tables that predate the profit_target column
-        try:
-            conn.execute("ALTER TABLE trailing_stops ADD COLUMN profit_target REAL")
-            conn.commit()
-            logger.info("Migrated trailing_stops: added profit_target column")
-        except Exception:
-            pass  # column already exists
+        # Migrations
+        for migration in [
+            ("ALTER TABLE trailing_stops ADD COLUMN profit_target REAL", "trailing_stops: added profit_target"),
+            ("ALTER TABLE trades ADD COLUMN trail_pct REAL", "trades: added trail_pct"),
+            ("ALTER TABLE trades ADD COLUMN final_hwm REAL", "trades: added final_hwm"),
+        ]:
+            try:
+                conn.execute(migration[0])
+                conn.commit()
+                logger.info("Migrated %s", migration[1])
+            except Exception:
+                pass  # column already exists
         logger.info("Database initialized")
     finally:
         conn.close()
@@ -126,14 +131,20 @@ def close_trade(
             pnl_usd = (entry - exit_price) * size_coin * leverage
             pnl_pct = ((entry - exit_price) / entry) * 100 * leverage
 
+        ts = conn.execute(
+            "SELECT trail_pct, high_water_mark FROM trailing_stops WHERE trade_id = ?", (trade_id,)
+        ).fetchone()
         conn.execute(
             """
             UPDATE trades SET
               exit_price = ?, pnl_usd = ?, pnl_pct = ?,
-              status = 'closed', close_time = ?, close_reason = ?
+              status = 'closed', close_time = ?, close_reason = ?,
+              trail_pct = ?, final_hwm = ?
             WHERE id = ?
             """,
-            (exit_price, pnl_usd, pnl_pct, datetime.utcnow().isoformat(), close_reason, trade_id),
+            (exit_price, pnl_usd, pnl_pct, datetime.utcnow().isoformat(), close_reason,
+             ts["trail_pct"] if ts else None, ts["high_water_mark"] if ts else None,
+             trade_id),
         )
         conn.execute("DELETE FROM trailing_stops WHERE trade_id = ?", (trade_id,))
         conn.commit()

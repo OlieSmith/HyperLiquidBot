@@ -35,7 +35,7 @@ STRATEGY_WEIGHTS = {
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "1800"))
 
 # Profit target as a multiple of the trail distance (e.g. 1.5 means target = 1.5x the stop distance)
-PROFIT_TARGET_R = float(os.getenv("PROFIT_TARGET_R", "1.5"))
+PROFIT_TARGET_R = float(os.getenv("PROFIT_TARGET_R", "2.0"))
 
 
 class RiskManager:

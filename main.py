@@ -36,8 +36,8 @@ from strategies import MomentumStrategy, MeanReversionStrategy, TrendFollowingSt
 INTRADAY_UPDATE_SECONDS = int(float(os.getenv("INTRADAY_UPDATE_HOURS", "4")) * 3600)
 
 ATR_PERIOD = 14
-ATR_MULTIPLIER = 3.0   # reduced from 5.5 — tighter stops to cut losers faster
-ATR_MIN_TRAIL_PCT = 1.0
+ATR_MULTIPLIER = 4.5   # raised from 3.0 — 3.0 was too tight, noise-stopping trades within 2% of entry
+ATR_MIN_TRAIL_PCT = 2.0  # raised from 1.0 — 1% floor was within normal candle wick range
 ATR_MAX_TRAIL_PCT = 8.0  # capped at 8% — prevents blow-ups on volatile coins like TURBO
 
 
