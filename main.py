@@ -40,6 +40,15 @@ ATR_MULTIPLIER = 4.5   # raised from 3.0 — 3.0 was too tight, noise-stopping t
 ATR_MIN_TRAIL_PCT = 2.0  # raised from 1.0 — 1% floor was within normal candle wick range
 ATR_MAX_TRAIL_PCT = 8.0  # capped at 8% — prevents blow-ups on volatile coins like TURBO
 
+# Coins to never trade — low-cap memes and low-quality tokens with erratic price action.
+# Override with COIN_BLOCKLIST env var (comma-separated, e.g. "DOGE,PEPE,SHIB").
+_default_blocklist = "FARTCOIN,CHILLGUY,TST,STABLE,XPL,HEMI,REZ"
+COIN_BLOCKLIST: set[str] = {
+    c.strip().upper()
+    for c in os.getenv("COIN_BLOCKLIST", _default_blocklist).split(",")
+    if c.strip()
+}
+
 
 def _calc_atr_pct(df: pd.DataFrame, price: float, period: int = ATR_PERIOD) -> float:
     """Return ATR as a % of price. Used to set dynamic trailing stop distance."""
@@ -113,6 +122,8 @@ def main():
             composite_signals = []   # list of (signal, df) tuples
             for coin in coins:
                 if coin not in current_prices:
+                    continue
+                if coin in COIN_BLOCKLIST:
                     continue
                 df = client.get_candles(coin, interval="15m", lookback_hours=72)
                 time.sleep(0.15)  # avoid 429 rate limiting from HyperLiquid API

@@ -37,6 +37,11 @@ COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "1800"))
 # Profit target as a multiple of the trail distance (e.g. 1.5 means target = 1.5x the stop distance)
 PROFIT_TARGET_R = float(os.getenv("PROFIT_TARGET_R", "2.0"))
 
+# Minimum profit the trade must reach before the stop is floored at breakeven.
+# Until HWM clears entry by this %, the hard stop at trail_pct below entry applies.
+# Once cleared, the stop can never go below entry price — locking in at worst breakeven.
+BREAKEVEN_BUFFER_PCT = float(os.getenv("BREAKEVEN_BUFFER_PCT", "1.5"))
+
 
 class RiskManager:
     def __init__(self, max_positions: int, trailing_stop_pct: float):
@@ -198,19 +203,27 @@ class RiskManager:
             trade_id = ts["trade_id"]
             profit_target = ts.get("profit_target")
 
+            entry_price = ts["entry_price"]
+
             if direction == "long":
                 if profit_target and price >= profit_target:
                     logger.info(f"Profit target hit: {coin} LONG price={price:.4f} target={profit_target:.4f}")
                     to_close.append({"trade_id": trade_id, "coin": coin, "reason": "profit_target"})
                     continue
                 new_hwm = max(hwm, price)
-                stop_price = new_hwm * (1 - trail_pct / 100)
+                raw_stop = new_hwm * (1 - trail_pct / 100)
+                # Once HWM has cleared entry by BREAKEVEN_BUFFER_PCT, floor the stop at
+                # entry so the trade can never close below breakeven.
+                if new_hwm >= entry_price * (1 + BREAKEVEN_BUFFER_PCT / 100):
+                    stop_price = max(raw_stop, entry_price)
+                else:
+                    stop_price = raw_stop
                 if price <= stop_price:
                     logger.info(f"Trailing stop hit: {coin} LONG price={price:.4f} stop={stop_price:.4f}")
                     to_close.append({"trade_id": trade_id, "coin": coin, "reason": "trailing_stop"})
                 else:
                     db.upsert_trailing_stop(
-                        trade_id, coin, direction, ts["entry_price"], trail_pct, new_hwm, stop_price, profit_target
+                        trade_id, coin, direction, entry_price, trail_pct, new_hwm, stop_price, profit_target
                     )
             else:  # short
                 if profit_target and price <= profit_target:
@@ -218,13 +231,18 @@ class RiskManager:
                     to_close.append({"trade_id": trade_id, "coin": coin, "reason": "profit_target"})
                     continue
                 new_hwm = min(hwm, price)
-                stop_price = new_hwm * (1 + trail_pct / 100)
+                raw_stop = new_hwm * (1 + trail_pct / 100)
+                # Mirror breakeven floor for shorts.
+                if new_hwm <= entry_price * (1 - BREAKEVEN_BUFFER_PCT / 100):
+                    stop_price = min(raw_stop, entry_price)
+                else:
+                    stop_price = raw_stop
                 if price >= stop_price:
                     logger.info(f"Trailing stop hit: {coin} SHORT price={price:.4f} stop={stop_price:.4f}")
                     to_close.append({"trade_id": trade_id, "coin": coin, "reason": "trailing_stop"})
                 else:
                     db.upsert_trailing_stop(
-                        trade_id, coin, direction, ts["entry_price"], trail_pct, new_hwm, stop_price, profit_target
+                        trade_id, coin, direction, entry_price, trail_pct, new_hwm, stop_price, profit_target
                     )
 
         return to_close
