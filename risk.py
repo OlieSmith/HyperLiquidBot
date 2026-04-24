@@ -31,8 +31,9 @@ STRATEGY_WEIGHTS = {
     "bb_compression":  float(os.getenv("BB_COMPRESSION_WEIGHT",  "1.0")),
 }
 
-# Default cooldown after a trade closes: 2 x 15-minute bars = 30 minutes
-COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "1800"))
+# Default cooldown after a trade closes: 3 hours — raised from 30 min to prevent
+# rapid re-entry on volatile coins that keep generating signals after a loss.
+COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "10800"))
 
 # Profit target as a multiple of the trail distance (e.g. 1.5 means target = 1.5x the stop distance)
 PROFIT_TARGET_R = float(os.getenv("PROFIT_TARGET_R", "2.0"))

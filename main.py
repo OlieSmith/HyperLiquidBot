@@ -152,6 +152,14 @@ def main():
                                     logger.debug(f"Trend filter: blocked long {coin} (price below 200-SMA)")
                                     composite = None
                     if composite:
+                        # Volume filter: require current bar volume > 1.3x 20-period average.
+                        # Enters on quiet price action are usually noise — volume confirms conviction.
+                        vol_avg = df["volume"].rolling(20).mean().iloc[-1]
+                        cur_vol = df["volume"].iloc[-1]
+                        if not pd.isna(vol_avg) and vol_avg > 0 and cur_vol < vol_avg * 1.3:
+                            logger.debug(f"Volume filter: blocked {coin} (vol={cur_vol:.2f} < 1.3x avg={vol_avg:.2f})")
+                            composite = None
+                    if composite:
                         composite_signals.append((composite, df))
 
             logger.info(f"Active signals: {len(composite_signals)}")

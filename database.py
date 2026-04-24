@@ -255,9 +255,9 @@ def get_daily_stats() -> dict:
             """
             SELECT
               SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) as open_count,
-              SUM(CASE WHEN status='closed' AND date(close_time) = date('now') AND pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
-              SUM(CASE WHEN status='closed' AND date(close_time) = date('now') AND pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
-              SUM(CASE WHEN status='closed' AND date(close_time) = date('now') THEN pnl_usd ELSE 0 END) as pnl_today
+              SUM(CASE WHEN status='closed' AND close_time >= datetime('now', '-24 hours') AND pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+              SUM(CASE WHEN status='closed' AND close_time >= datetime('now', '-24 hours') AND pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
+              SUM(CASE WHEN status='closed' AND close_time >= datetime('now', '-24 hours') THEN pnl_usd ELSE 0 END) as pnl_today
             FROM trades
             """
         ).fetchone()

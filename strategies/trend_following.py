@@ -51,15 +51,18 @@ class TrendFollowingStrategy(BaseStrategy):
             # Normalize histogram by price
             hist_norm = cur_hist / cur_price * 100
 
-            # Long: fast EMA above slow EMA (or just crossed), MACD histogram positive and growing
-            if cur_fast > cur_slow and cur_hist > 0 and cur_hist > prev_hist:
-                # Crossed recently if prev was below
-                just_crossed = prev_fast <= prev_slow
+            # Require the EMA cross to have happened within the last 5 bars (75 min).
+            # Without this, trend_following fires throughout a multi-hour trend rather
+            # than at the actual entry point.
+            ema_diff_recent = (fast_ema - slow_ema).iloc[-6:-1]  # last 5 completed bars
+            recently_crossed_up = (ema_diff_recent <= 0).any()
+            recently_crossed_down = (ema_diff_recent >= 0).any()
+
+            # Long: fast EMA crosses above slow EMA, MACD histogram positive and growing
+            if cur_fast > cur_slow and cur_hist > 0 and cur_hist > prev_hist and recently_crossed_up:
                 spread_score = min(1.0, abs(ema_spread_pct) / 3.0)
                 hist_score = min(1.0, abs(hist_norm) * 10)
-                score = spread_score * 0.5 + hist_score * 0.5
-                if just_crossed:
-                    score = min(1.0, score * 1.3)  # boost for fresh cross
+                score = min(1.0, (spread_score * 0.5 + hist_score * 0.5) * 1.3)
                 return Signal(
                     coin=coin,
                     direction="long",
@@ -69,18 +72,14 @@ class TrendFollowingStrategy(BaseStrategy):
                     metadata={
                         "ema_spread_pct": round(ema_spread_pct, 3),
                         "macd_hist": round(cur_hist, 6),
-                        "just_crossed": just_crossed,
                     },
                 )
 
-            # Short: fast EMA below slow EMA, MACD histogram negative and falling
-            if cur_fast < cur_slow and cur_hist < 0 and cur_hist < prev_hist:
-                just_crossed = prev_fast >= prev_slow
+            # Short: fast EMA crosses below slow EMA, MACD histogram negative and falling
+            if cur_fast < cur_slow and cur_hist < 0 and cur_hist < prev_hist and recently_crossed_down:
                 spread_score = min(1.0, abs(ema_spread_pct) / 3.0)
                 hist_score = min(1.0, abs(hist_norm) * 10)
-                score = spread_score * 0.5 + hist_score * 0.5
-                if just_crossed:
-                    score = min(1.0, score * 1.3)
+                score = min(1.0, (spread_score * 0.5 + hist_score * 0.5) * 1.3)
                 return Signal(
                     coin=coin,
                     direction="short",
@@ -90,7 +89,6 @@ class TrendFollowingStrategy(BaseStrategy):
                     metadata={
                         "ema_spread_pct": round(ema_spread_pct, 3),
                         "macd_hist": round(cur_hist, 6),
-                        "just_crossed": just_crossed,
                     },
                 )
 
