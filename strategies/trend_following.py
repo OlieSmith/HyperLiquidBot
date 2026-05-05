@@ -51,10 +51,10 @@ class TrendFollowingStrategy(BaseStrategy):
             # Normalize histogram by price
             hist_norm = cur_hist / cur_price * 100
 
-            # Require the EMA cross to have happened within the last 5 bars (75 min).
+            # Require the EMA cross to have happened within the last 3 bars (45 min).
             # Without this, trend_following fires throughout a multi-hour trend rather
             # than at the actual entry point.
-            ema_diff_recent = (fast_ema - slow_ema).iloc[-6:-1]  # last 5 completed bars
+            ema_diff_recent = (fast_ema - slow_ema).iloc[-4:-1]  # last 3 completed bars
             recently_crossed_up = (ema_diff_recent <= 0).any()
             recently_crossed_down = (ema_diff_recent >= 0).any()
 

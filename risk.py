@@ -79,12 +79,13 @@ class RiskManager:
         long_score /= total_weight
         short_score /= total_weight
 
-        # Require at least 2 strategies to agree before entering
-        if len(signals) < 2:
+        # Require at least 2 strategies to agree, OR a single very high conviction signal.
+        # Single-strategy entries are allowed only when normalized score >= 0.85.
+        if len(signals) < 2 and max(long_score, short_score) < 0.85:
             return None
 
-        # Need at least 0.70 normalized score to act — raised from 0.65 to cut borderline entries
-        if long_score > short_score and long_score >= 0.70:
+        # Need at least 0.65 normalized score to act (lowered from 0.70 to increase trade frequency)
+        if long_score > short_score and long_score >= 0.65:
             conviction = self._score_to_conviction(long_score)
             return Signal(
                 coin=coin,
@@ -94,7 +95,7 @@ class RiskManager:
                 score=long_score,
                 metadata={"long_score": long_score, "short_score": short_score},
             )
-        elif short_score > long_score and short_score >= 0.70:
+        elif short_score > long_score and short_score >= 0.65:
             conviction = self._score_to_conviction(short_score)
             return Signal(
                 coin=coin,
