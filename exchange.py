@@ -25,6 +25,7 @@ class HyperLiquidClient:
 
         from hyperliquid.info import Info
         self.info = Info(self.base_url, skip_ws=True)
+        self.info.timeout = 30  # prevent indefinite hangs on stalled connections
 
         self.exchange = None
         self.account = None
