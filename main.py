@@ -36,9 +36,9 @@ from strategies import MomentumStrategy, MeanReversionStrategy, TrendFollowingSt
 INTRADAY_UPDATE_SECONDS = int(float(os.getenv("INTRADAY_UPDATE_HOURS", "4")) * 3600)
 
 ATR_PERIOD = 14
-ATR_MULTIPLIER = 4.5   # raised from 3.0 — 3.0 was too tight, noise-stopping trades within 2% of entry
-ATR_MIN_TRAIL_PCT = 3.0  # raised from 2.0 — 2% floor still noise-stopping volatile coins
-ATR_MAX_TRAIL_PCT = 8.0  # capped at 8% — prevents blow-ups on volatile coins like TURBO
+ATR_MULTIPLIER = 3.5   # lowered from 4.5 — 4.5x was generating 8% stops; avg loss ballooned to $34
+ATR_MIN_TRAIL_PCT = 2.0  # lowered from 3.0 — tighter floor to reduce avg loss size
+ATR_MAX_TRAIL_PCT = 5.0  # lowered from 8.0 — 8% stop × 2x leverage = 16% loss per stop-out
 
 # Coins to never trade — low-cap memes and low-quality tokens with erratic price action.
 # Override with COIN_BLOCKLIST env var (comma-separated, e.g. "DOGE,PEPE,SHIB").
@@ -169,7 +169,7 @@ def main():
 
             for signal, signal_df in composite_signals:
                 coin = signal.coin
-                can_open, reason = risk.can_open_position(coin)
+                can_open, reason = risk.can_open_position(coin, signal.direction)
                 if not can_open:
                     logger.debug(f"Skip {coin}: {reason}")
                     continue

@@ -248,6 +248,31 @@ def get_stats() -> dict:
         conn.close()
 
 
+def get_consecutive_trailing_losses(coin: str, direction: str, lookback_hours: int = 72) -> int:
+    """Count consecutive trailing_stop losses for coin+direction from most recent backwards."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT close_reason, pnl_usd FROM trades
+            WHERE coin = ? AND direction = ? AND status = 'closed'
+              AND close_time >= strftime('%Y-%m-%dT%H:%M:%S', 'now', ? || ' hours')
+            ORDER BY close_time DESC
+            LIMIT 5
+            """,
+            (coin, direction, f"-{lookback_hours}"),
+        ).fetchall()
+        count = 0
+        for row in rows:
+            if row["close_reason"] == "trailing_stop" and row["pnl_usd"] < 0:
+                count += 1
+            else:
+                break
+        return count
+    finally:
+        conn.close()
+
+
 def get_daily_stats() -> dict:
     conn = get_connection()
     try:
@@ -255,9 +280,9 @@ def get_daily_stats() -> dict:
             """
             SELECT
               SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) as open_count,
-              SUM(CASE WHEN status='closed' AND close_time >= datetime('now', '-24 hours') AND pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
-              SUM(CASE WHEN status='closed' AND close_time >= datetime('now', '-24 hours') AND pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
-              SUM(CASE WHEN status='closed' AND close_time >= datetime('now', '-24 hours') THEN pnl_usd ELSE 0 END) as pnl_today
+              SUM(CASE WHEN status='closed' AND close_time >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-24 hours') AND pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+              SUM(CASE WHEN status='closed' AND close_time >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-24 hours') AND pnl_usd <= 0 THEN 1 ELSE 0 END) as losses,
+              SUM(CASE WHEN status='closed' AND close_time >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-24 hours') THEN pnl_usd ELSE 0 END) as pnl_today
             FROM trades
             """
         ).fetchone()

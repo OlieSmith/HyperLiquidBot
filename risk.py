@@ -31,9 +31,13 @@ STRATEGY_WEIGHTS = {
     "bb_compression":  float(os.getenv("BB_COMPRESSION_WEIGHT",  "1.0")),
 }
 
-# Default cooldown after a trade closes: 3 hours — raised from 30 min to prevent
-# rapid re-entry on volatile coins that keep generating signals after a loss.
+# Default cooldown after a trade closes: 3 hours
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "10800"))
+
+# After this many consecutive trailing_stop losses on the same coin+direction,
+# block re-entry for 24h regardless of cooldown state.
+CONSECUTIVE_LOSS_LIMIT = int(os.getenv("CONSECUTIVE_LOSS_LIMIT", "3"))
+CONSECUTIVE_LOSS_COOLDOWN = int(os.getenv("CONSECUTIVE_LOSS_COOLDOWN", "86400"))
 
 # Profit target as a multiple of the trail distance (e.g. 1.5 means target = 1.5x the stop distance)
 PROFIT_TARGET_R = float(os.getenv("PROFIT_TARGET_R", "2.0"))
@@ -124,7 +128,7 @@ class RiskManager:
 
     # ─── Position Checks ──────────────────────────────────────────────────────
 
-    def can_open_position(self, coin: str) -> tuple[bool, str]:
+    def can_open_position(self, coin: str, direction: str = "") -> tuple[bool, str]:
         """Check if we can open a new position."""
         # Enforce cooldown: block re-entry for COOLDOWN_SECONDS after last close
         cooldown_exp = self._cooldown_until.get(coin, 0)
@@ -140,6 +144,14 @@ class RiskManager:
         existing_coins = {t["coin"] for t in open_trades}
         if coin in existing_coins:
             return False, f"Already have open position in {coin}"
+
+        # Block re-entry after N consecutive trailing_stop losses in same direction
+        if direction:
+            consec = db.get_consecutive_trailing_losses(coin, direction)
+            if consec >= CONSECUTIVE_LOSS_LIMIT:
+                self._cooldown_until[coin] = time.time() + CONSECUTIVE_LOSS_COOLDOWN
+                logger.debug(f"Consecutive loss block: {coin} {direction} ({consec} straight trailing_stop losses)")
+                return False, f"Consecutive loss block: {coin} {direction} ({consec} losses)"
 
         return True, "ok"
 
