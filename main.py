@@ -178,6 +178,20 @@ def main():
                 if not price:
                     continue
 
+                # ATR-ceiling filter: if the raw ATR-implied trail would exceed
+                # ATR_MAX_TRAIL_PCT, the coin is too volatile for this stop model.
+                # Previously we clamped to the ceiling and traded anyway; data from
+                # 2026-07-21 to 08-01 showed 19 trades clamped at the 5% ceiling,
+                # 0 of which ever reached profit_target, avg -$32.68/trade — the
+                # widest-stop cohort was a clean bleed. Skip instead of clamping.
+                atr_pct = _calc_atr_pct(signal_df, price)
+                if atr_pct > 0 and atr_pct * ATR_MULTIPLIER > ATR_MAX_TRAIL_PCT:
+                    logger.debug(
+                        f"Skip {coin}: ATR-implied trail {atr_pct * ATR_MULTIPLIER:.2f}% "
+                        f"exceeds ceiling ({ATR_MAX_TRAIL_PCT}%) — too volatile for this stop model"
+                    )
+                    continue
+
                 size_usd = risk.size_position(signal.conviction, account_value)
                 if size_usd < 10:
                     logger.warning(f"Position size too small for {coin}: ${size_usd:.2f}")
@@ -208,11 +222,8 @@ def main():
                     order_id=result.get("order_id"),
                 )
 
-                # ATR-based trailing stop: 5.5x ATR as % of price
-                atr_pct = _calc_atr_pct(signal_df, fill_price)
-                atr_trail_pct = None
-                if atr_pct > 0:
-                    atr_trail_pct = max(ATR_MIN_TRAIL_PCT, min(ATR_MAX_TRAIL_PCT, atr_pct * ATR_MULTIPLIER))
+                # ATR-based trailing stop: ATR_MULTIPLIER x ATR as % of price
+                atr_trail_pct = max(ATR_MIN_TRAIL_PCT, min(ATR_MAX_TRAIL_PCT, atr_pct * ATR_MULTIPLIER)) if atr_pct > 0 else None
                 risk.init_trailing_stop(trade_id, coin, signal.direction, fill_price, atr_trail_pct)
 
                 if notifier:

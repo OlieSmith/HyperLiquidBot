@@ -4,7 +4,7 @@ Sends a summary + tweak suggestions for each bot via their own Telegram token.
 """
 import sqlite3
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 # ── Bot configs ────────────────────────────────────────────────────────────────
 BOTS = {
@@ -25,8 +25,10 @@ BOTS = {
     },
 }
 
-DAY_AGO = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-NOW_LABEL = datetime.now().strftime("%d %b %Y %H:%M")
+_utc_now = datetime.now(timezone.utc)
+TODAY_START = _utc_now.strftime("%Y-%m-%dT00:00:00")
+TODAY_START_MS = int(_utc_now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+NOW_LABEL = _utc_now.strftime("%d %b %Y %H:%M")
 
 
 def send(token: str, chat_id: str, text: str):
@@ -115,19 +117,17 @@ def solana_report():
     cfg = BOTS["solana"]
     conn = db(cfg["db"])
 
-    day_ago_ms = int((datetime.now(timezone.utc) - timedelta(days=1)).timestamp() * 1000)
-
     # All-time closed
     all_closed = conn.execute(
         "SELECT pnl_usd, pnl_pct, exit_reason, setup_type, confidence_bucket "
         "FROM paper_trades WHERE status='closed'"
     ).fetchall()
 
-    # Last 24h closed
+    # Today (UTC midnight onwards)
     recent = conn.execute(
         "SELECT pnl_usd, pnl_pct, exit_reason, setup_type, confidence_bucket "
         "FROM paper_trades WHERE status='closed' AND exit_ts >= ?",
-        (day_ago_ms,)
+        (TODAY_START_MS,)
     ).fetchall()
 
     open_count = conn.execute("SELECT COUNT(*) as n FROM paper_trades WHERE status='open'").fetchone()["n"]
@@ -196,7 +196,7 @@ def solana_report():
     msg = (
         f"🟣 <b>SOLANA BOT — Daily Report</b>\n"
         f"<i>{NOW_LABEL}</i>\n\n"
-        f"<b>── Last 24h ──</b>\n"
+        f"<b>── Today (UTC) ──</b>\n"
         f"Closed: {r_total} | Wins: {r_wins} | Losses: {r_losses}\n"
         f"PnL: <b>${r_pnl:.2f}</b> | Win Rate: {r_wr:.1f}%\n\n"
         f"<b>── All-Time ──</b>\n"
@@ -224,11 +224,11 @@ def hyperliquid_report():
         "open_time, close_time FROM trades WHERE status='closed'"
     ).fetchall()
 
-    # Last 24h
+    # Today (UTC midnight onwards)
     recent = conn.execute(
         "SELECT pnl_usd, pnl_pct, direction, strategy, conviction, close_reason "
         "FROM trades WHERE status='closed' AND close_time >= ?",
-        (DAY_AGO,)
+        (TODAY_START,)
     ).fetchall()
 
     open_trades = conn.execute(
@@ -323,7 +323,7 @@ def hyperliquid_report():
     msg = (
         f"⚡ <b>HYPERLIQUID BOT — Daily Report</b>\n"
         f"<i>{NOW_LABEL}</i>\n\n"
-        f"<b>── Last 24h ──</b>\n"
+        f"<b>── Today (UTC) ──</b>\n"
         f"Closed: {r_total} | Wins: {r_wins} | Losses: {r_losses}\n"
         f"PnL: <b>${r_pnl:.2f}</b> | Win Rate: {r_wr:.1f}%\n\n"
         f"<b>── All-Time ──</b>\n"

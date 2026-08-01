@@ -5,6 +5,7 @@ from typing import Optional
 from datetime import datetime, timedelta
 
 import pandas as pd
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,8 @@ class HyperLiquidClient:
         self.leverage = int(os.getenv("LEVERAGE", "2"))
 
         from hyperliquid.info import Info
-        self.info = Info(self.base_url, skip_ws=True)
-        self.info.timeout = 30  # prevent indefinite hangs on stalled connections
+        spot_meta = self._fetch_clean_spot_meta()
+        self.info = Info(self.base_url, skip_ws=True, spot_meta=spot_meta, timeout=30)
 
         self.exchange = None
         self.account = None
@@ -39,6 +40,27 @@ class HyperLiquidClient:
         mode = "PAPER" if self.paper_trading else "LIVE"
         net = "TESTNET" if self.testnet else "MAINNET"
         logger.info(f"HyperLiquid client ready: {mode} / {net}")
+
+    def _fetch_clean_spot_meta(self) -> dict:
+        """Fetch spot metadata and drop universe entries with out-of-range token indices.
+
+        HyperLiquid occasionally publishes spot universe entries that reference a token
+        index beyond the length of the tokens list, causing the SDK to crash with an
+        IndexError (0.22.0) or KeyError (0.23.0) during Info.__init__.
+        """
+        resp = requests.post(
+            f"{self.base_url}/info",
+            json={"type": "spotMeta"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        n = len(data.get("tokens", []))
+        data["universe"] = [
+            s for s in data.get("universe", [])
+            if s["tokens"][0] < n and s["tokens"][1] < n
+        ]
+        return data
 
     def _init_exchange(self):
         if not self.private_key or not self.wallet_address:
